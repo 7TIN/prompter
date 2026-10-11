@@ -1,86 +1,195 @@
 mod rewrite;
 mod style;
 
+use std::fmt;
+
 use gpui_kit::component::button::*;
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::*;
 use style::Style;
 
-fn read_clipboard() -> String {
-    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-        Ok(t) => t,
-        Err(_) => String::new(),
-    }
-}
-
-fn write_clipboard(text: &str) -> Result<(), String> {
+fn read_clipboard() -> Option<String> {
     arboard::Clipboard::new()
-        .and_then(|mut c| c.set_text(text.to_string()))
-        .map_err(|e| format!("clipboard error: {e}"))
+        .and_then(|mut clipboard| clipboard.get_text())
+        .ok()
 }
 
-fn load_api_key() -> String {
+fn write_clipboard(text: &str) -> Result<(), arboard::Error> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text.to_owned()))
+}
+
+fn load_api_key_from_env() -> String {
     std::env::var("GEMINI_API_KEY").unwrap_or_default()
 }
 
+fn mask_key(key: &str) -> String {
+    let key = key.trim();
+    match key.len() {
+        0 => "not set".to_owned(),
+        1..=4 => "****".to_owned(),
+        _ => format!("...{}", &key[key.len() - 4..]),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeySource {
+    Typed,
+    Env,
+    Offline,
+}
+
+impl fmt::Display for KeySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Typed => f.write_str("typed"),
+            Self::Env => f.write_str("env"),
+            Self::Offline => f.write_str("none (offline)"),
+        }
+    }
+}
+
 struct PrompterView {
-    input: String,
+    prompt_text: String,
+    prompt_input: Entity<TextareaState>,
     output: String,
     style: Style,
     status: String,
-    api_key: String,
+    api_key_env: String,
+    api_key_typed: String,
+    api_key_input: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl PrompterView {
-    fn new(_cx: &mut Context<Self>) -> Self {
-        let key = load_api_key();
-        let status = if key.trim().is_empty() {
-            "Offline mode (set GEMINI_API_KEY for Gemini)".to_string()
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let initial = read_clipboard().unwrap_or_default();
+        let prompt_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(6)
+                .placeholder("Type/paste prompt here, or Refresh from Clipboard")
+        });
+        prompt_input.update(cx, |state, cx| {
+            state.set_value(initial.clone(), window, cx);
+        });
+        let prompt_subscription = cx.subscribe_in(
+            &prompt_input,
+            window,
+            |this: &mut Self, state, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.prompt_text = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        );
+
+        let api_key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Paste Gemini API key here (or set GEMINI_API_KEY)")
+        });
+        let key_subscription = cx.subscribe_in(
+            &api_key_input,
+            window,
+            |this: &mut Self, state, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.api_key_typed = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        );
+
+        let api_key_env = load_api_key_from_env();
+        let status = if api_key_env.trim().is_empty() {
+            "Paste API key above, or set GEMINI_API_KEY env. Empty = offline mode.".to_owned()
         } else {
-            "Ready (Gemini)".to_string()
+            "Ready. Env key found; typed key overrides it.".to_owned()
         };
+
         Self {
-            input: read_clipboard(),
+            prompt_text: initial,
+            prompt_input,
             output: String::new(),
             style: Style::default(),
             status,
-            api_key: key,
+            api_key_env,
+            api_key_typed: String::new(),
+            api_key_input,
+            _subscriptions: vec![prompt_subscription, key_subscription],
         }
     }
 
-    fn refresh_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        self.input = read_clipboard();
-        if self.input.trim().is_empty() {
-            self.status = "Clipboard is empty. Copy text then Refresh.".to_string();
+    fn effective_key(&self) -> Option<&str> {
+        let typed = self.api_key_typed.trim();
+        if !typed.is_empty() {
+            return Some(typed);
+        }
+        let env = self.api_key_env.trim();
+        (!env.is_empty()).then_some(env)
+    }
+
+    fn key_source(&self) -> KeySource {
+        if !self.api_key_typed.trim().is_empty() {
+            KeySource::Typed
+        } else if !self.api_key_env.trim().is_empty() {
+            KeySource::Env
         } else {
-            self.status = format!("Loaded {} chars from clipboard.", self.input.len());
+            KeySource::Offline
+        }
+    }
+
+    fn reload_env_key(&mut self, cx: &mut Context<Self>) {
+        self.api_key_env = load_api_key_from_env();
+        self.status = format!(
+            "Env reloaded. Using {} key {}.",
+            self.key_source(),
+            mask_key(self.effective_key().unwrap_or_default())
+        );
+        cx.notify();
+    }
+
+    fn refresh_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match read_clipboard() {
+            Some(text) if !text.trim().is_empty() => {
+                self.status = format!("Loaded {} chars from clipboard.", text.len());
+                self.prompt_text = text.clone();
+                self.prompt_input.update(cx, |state, cx| {
+                    state.set_value(text, window, cx);
+                });
+            }
+            _ => {
+                self.status = "Clipboard is empty. Copy text then Refresh.".to_owned();
+            }
         }
         cx.notify();
     }
 
-    fn set_style(&mut self, s: Style, cx: &mut Context<Self>) {
-        self.style = s;
-        self.status = format!("Style: {}", s.label());
+    fn set_style(&mut self, style: Style, cx: &mut Context<Self>) {
+        self.style = style;
+        self.status = format!("Style: {style}");
         cx.notify();
     }
 
     fn generate(&mut self, cx: &mut Context<Self>) {
-        if self.input.trim().is_empty() {
-            self.status = "Nothing to polish. Refresh from clipboard first.".to_string();
+        if self.prompt_text.trim().is_empty() {
+            self.status =
+                "Nothing to polish. Type in the box or Refresh from clipboard.".to_owned();
             cx.notify();
             return;
         }
-        self.status = format!("Polishing with {}...", self.style.label());
+        let key = self.effective_key().unwrap_or_default().to_owned();
+        let source = self.key_source();
+        self.status = format!("Polishing with {} (key: {source})...", self.style);
         cx.notify();
-        // Blocking call on UI thread for v1 (1-3s freeze on Generate is acceptable).
-        // v1.1: move to background executor.
-        match rewrite::polish_blocking(&self.input, self.style, &self.api_key) {
-            Ok(text) => {
-                self.output = text;
-                self.status = "Done. Use Copy Result.".to_string();
+        // Blocking call on the UI thread for v1; move to a background
+        // executor in v1.1.
+        match rewrite::polish_blocking(&self.prompt_text, self.style, &key) {
+            Ok(polished) => {
+                self.output = polished;
+                self.status = "Done. Use Copy Result.".to_owned();
             }
-            Err(e) => {
-                self.status = format!("Error: {e}");
+            Err(error) => {
+                self.status = format!("Error: {error}");
             }
         }
         cx.notify();
@@ -88,11 +197,11 @@ impl PrompterView {
 
     fn copy_result(&mut self, cx: &mut Context<Self>) {
         if self.output.trim().is_empty() {
-            self.status = "No output to copy.".to_string();
+            self.status = "No output to copy.".to_owned();
         } else {
             match write_clipboard(&self.output) {
-                Ok(_) => self.status = "Copied to clipboard.".to_string(),
-                Err(e) => self.status = e,
+                Ok(()) => self.status = "Copied to clipboard.".to_owned(),
+                Err(error) => self.status = format!("Clipboard: {error}"),
             }
         }
         cx.notify();
@@ -101,19 +210,17 @@ impl PrompterView {
 
 impl Render for PrompterView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let input_preview = if self.input.len() > 2000 {
-            format!("{}... [{} chars total]", &self.input[..2000], self.input.len())
-        } else if self.input.is_empty() {
-            "(empty - copy text anywhere, then Refresh)".to_string()
-        } else {
-            self.input.clone()
-        };
-        let output_preview = if self.output.is_empty() {
-            "(output appears here)".to_string()
+        let output = if self.output.is_empty() {
+            "(output appears here)".to_owned()
         } else {
             self.output.clone()
         };
         let status = self.status.clone();
+        let key_info = format!(
+            "Key: {} ({})",
+            mask_key(self.effective_key().unwrap_or_default()),
+            self.key_source()
+        );
 
         div()
             .v_flex()
@@ -121,30 +228,39 @@ impl Render for PrompterView {
             .p_4()
             .size_full()
             .child("Prompter - Ctrl+Alt+P (window must be open in v1)")
-            .child(format!("Status: {status}"))
-            .child("Style:")
+            .child("Gemini API key (typed overrides env, paste with Ctrl+V):")
+            .child(Input::new(&self.api_key_input))
             .child(
                 div()
                     .h_flex()
                     .gap_2()
-                    .child({
-                        let mut row = div().h_flex().gap_2();
-                        for s in Style::all() {
-                            let st = *s;
-                            let btn = if st == self.style {
-                                Button::new(st.id()).primary().label(st.label())
-                            } else {
-                                Button::new(st.id()).label(st.label())
-                            };
-                            row = row.child(btn.on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_style(st, cx);
-                            })));
-                        }
-                        row
-                    }),
+                    .child(key_info)
+                    .child(
+                        Button::new("reload-env")
+                            .label("Reload Env Key")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.reload_env_key(cx);
+                            })),
+                    ),
             )
-            .child(format!("Input [{}]:", self.style.label()))
-            .child(input_preview)
+            .child(format!("Status: {status}"))
+            .child("Style:")
+            .child({
+                let mut row = div().h_flex().gap_2();
+                for &style in Style::all() {
+                    let button = if style == self.style {
+                        Button::new(style.id()).primary().label(style.label())
+                    } else {
+                        Button::new(style.id()).label(style.label())
+                    };
+                    row = row.child(button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_style(style, cx);
+                    })));
+                }
+                row
+            })
+            .child(format!("Prompt [{}] - type below or Refresh:", self.style))
+            .child(Textarea::new(&self.prompt_input))
             .child(
                 div()
                     .h_flex()
@@ -152,8 +268,8 @@ impl Render for PrompterView {
                     .child(
                         Button::new("refresh")
                             .label("Refresh from Clipboard")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_from_clipboard(cx);
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh_from_clipboard(window, cx);
                             })),
                     )
                     .child(
@@ -173,49 +289,48 @@ impl Render for PrompterView {
                     ),
             )
             .child("Output:")
-            .child(output_preview)
+            .child(output)
     }
 }
 
-fn spawn_hotkey_listener() {
+fn spawn_hotkey_listener() -> std::thread::JoinHandle<()> {
     std::thread::spawn(|| {
         use global_hotkey::{
             GlobalHotKeyEvent,
-            hotkey::{Code, HotKey, Modifiers},
             GlobalHotKeyManager,
+            hotkey::{Code, HotKey, Modifiers},
         };
-        // Must create manager on this thread (Windows Win32 loop requirement).
-        let manager = match GlobalHotKeyManager::new() {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("hotkey manager failed: {e}");
-                return;
-            }
+
+        // The manager must live on the thread that pumps the Win32 loop.
+        let Ok(manager) = GlobalHotKeyManager::new() else {
+            eprintln!("hotkey manager failed to initialize");
+            return;
         };
-        let hk = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyP);
-        if let Err(e) = manager.register(hk) {
-            eprintln!("hotkey register failed (Ctrl+Alt+P): {e}");
+        let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyP);
+        if let Err(error) = manager.register(hotkey) {
+            eprintln!("hotkey register failed (Ctrl+Alt+P): {error}");
             return;
         }
         println!("Hotkey registered: Ctrl+Alt+P");
-        loop {
-            if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                // v1: log + snapshot clipboard length. Window focus-steal is v1.1.
-                let n = read_clipboard().len();
-                println!("hotkey event: {:?} (clipboard {} chars)", event, n);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Blocking receive: zero CPU while idle, no polling loop.
+        // v1 only logs; bringing the GPUI window to the front is v1.1.
+        while let Ok(event) = GlobalHotKeyEvent::receiver().recv() {
+            let chars = read_clipboard().map(|text| text.len()).unwrap_or(0);
+            println!("hotkey event: {event:?} (clipboard {chars} chars)");
         }
-    });
+    })
 }
 
 fn main() {
-    spawn_hotkey_listener();
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
-            cx.new(PrompterView::new)
-        })
-        .expect("Failed to open window");
-    });
+    let _hotkeys = spawn_hotkey_listener();
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| PrompterView::new(window, cx))
+            })
+            .expect("failed to open window");
+        });
 }

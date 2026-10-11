@@ -1,6 +1,9 @@
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+use std::fmt;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Style {
     Casual,
+    #[default]
     Brevity,
     Short,
     Direct,
@@ -9,65 +12,67 @@ pub enum Style {
 }
 
 impl Style {
-    pub fn all() -> &'static [Style] {
-        &[
-            Style::Casual,
-            Style::Brevity,
-            Style::Short,
-            Style::Direct,
-            Style::Informed,
-            Style::Normal,
-        ]
+    pub const ALL: &'static [Self] = &[
+        Self::Casual,
+        Self::Brevity,
+        Self::Short,
+        Self::Direct,
+        Self::Informed,
+        Self::Normal,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        Self::ALL
     }
 
-    pub fn label(&self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Style::Casual => "Casual",
-            Style::Brevity => "Brevity",
-            Style::Short => "Short",
-            Style::Direct => "Direct",
-            Style::Informed => "Informed",
-            Style::Normal => "Normal",
+            Self::Casual => "Casual",
+            Self::Brevity => "Brevity",
+            Self::Short => "Short",
+            Self::Direct => "Direct",
+            Self::Informed => "Informed",
+            Self::Normal => "Normal",
         }
     }
 
-    pub fn id(&self) -> &'static str {
+    pub fn id(self) -> &'static str {
         match self {
-            Style::Casual => "style-casual",
-            Style::Brevity => "style-brevity",
-            Style::Short => "style-short",
-            Style::Direct => "style-direct",
-            Style::Informed => "style-informed",
-            Style::Normal => "style-normal",
+            Self::Casual => "style-casual",
+            Self::Brevity => "style-brevity",
+            Self::Short => "style-short",
+            Self::Direct => "style-direct",
+            Self::Informed => "style-informed",
+            Self::Normal => "style-normal",
         }
     }
 
-    pub fn instruction(&self) -> &'static str {
+    pub fn instruction(self) -> &'static str {
         match self {
-            Style::Casual => {
+            Self::Casual => {
                 "Rewrite in a friendly, casual tone. Fix grammar. Keep meaning. Output only the rewrite."
             }
-            Style::Brevity => {
+            Self::Brevity => {
                 "Rewrite with maximum brevity. Fix grammar. Replace long explanations with the precise technical term or concept in one word where possible. Output only the rewrite."
             }
-            Style::Short => {
+            Self::Short => {
                 "Rewrite as short as possible, ideally 1-2 sentences. Fix grammar. Output only the rewrite."
             }
-            Style::Direct => {
+            Self::Direct => {
                 "Rewrite in a direct, no-fluff, imperative style. Fix grammar. Output only the rewrite."
             }
-            Style::Informed => {
+            Self::Informed => {
                 "Rewrite as a precise, well-informed technical prompt. Fix grammar, expand ambiguous terms to correct technical concepts. Output only the rewrite."
             }
-            Style::Normal => {
+            Self::Normal => {
                 "Rewrite with correct grammar, clear and neutral. Keep meaning and detail level. Output only the rewrite."
             }
         }
     }
 }
 
-impl Default for Style {
-    fn default() -> Self {
-        Style::Brevity
+impl fmt::Display for Style {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
     }
 }

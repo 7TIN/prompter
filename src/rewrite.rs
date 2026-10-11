@@ -1,118 +1,191 @@
-use serde_json::{json, Value};
+use std::{fmt, time::Duration};
+
+use serde_json::{Value, json};
 
 use crate::style::Style;
+
+/// Default model. Override with the `GEMINI_MODEL` env var.
+pub const DEFAULT_MODEL: &str = "gemini-3.6-flash";
+
+#[derive(Debug)]
+pub enum PolishError {
+    EmptyInput,
+    Transport(reqwest::Error),
+    Api {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    Decode(serde_json::Error),
+    EmptyResponse,
+    ApiMessage(String),
+}
+
+impl fmt::Display for PolishError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyInput => f.write_str("input is empty"),
+            Self::Transport(e) => write!(f, "request failed: {e}"),
+            Self::Api { status, body } => write!(f, "Gemini {status}: {body}"),
+            Self::Decode(e) => write!(f, "invalid response: {e}"),
+            Self::EmptyResponse => f.write_str("empty response from model"),
+            Self::ApiMessage(msg) => write!(f, "Gemini error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for PolishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(e) => Some(e),
+            Self::Decode(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<reqwest::Error> for PolishError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl From<serde_json::Error> for PolishError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Decode(error)
+    }
+}
+
+fn model_id() -> String {
+    std::env::var("GEMINI_MODEL")
+        .ok()
+        .map(|model| model.trim().to_owned())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+}
 
 fn system_prompt(style: Style) -> String {
     format!(
         "You are a prompt-polishing tool. The user writes long prompts with bad grammar and verbose explanations. \
-Rewrite the given text into a clean prompt for an AI agent. Rules: fix grammar, be concise, \
-replace verbose explanations with the correct single technical word where possible, \
-preserve intent and all requirements, do not add new requirements, do not answer the prompt, \
-output ONLY the rewritten prompt with no preamble. Style: {}. Instruction: {}",
-        style.label(),
+         Rewrite the given text into a clean prompt for an AI agent. Rules: fix grammar, be concise, \
+         replace verbose explanations with the correct single technical word where possible, \
+         preserve intent and all requirements, do not add new requirements, do not answer the prompt, \
+         output ONLY the rewritten prompt with no preamble. Style: {style}. Instruction: {}",
         style.instruction()
     )
 }
 
-/// Offline fallback when no API key is set. Deterministic, no network.
-pub fn offline_polish(input: &str, style: Style) -> String {
-    let mut s = input.trim().to_string();
-    // Collapse whitespace runs into single spaces, keep single newlines between paragraphs.
-    let mut out = String::with_capacity(s.len());
-    let mut prev_space = false;
-    for ch in s.chars() {
-        if ch == '\r' {
-            continue;
-        }
-        if ch.is_whitespace() && ch != '\n' {
-            if !prev_space {
-                out.push(' ');
+fn normalize_whitespace(input: &str) -> String {
+    let without_cr = input.replace('\r', "");
+    let collapsed = without_cr
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Collapse runs of blank lines into a single blank line.
+    let mut lines = Vec::new();
+    let mut blank_run = 0;
+    for line in collapsed.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                lines.push(String::new());
             }
-            prev_space = true;
-        } else if ch == '\n' {
-            // keep at most one blank line
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-            prev_space = false;
         } else {
-            out.push(ch);
-            prev_space = false;
+            blank_run = 0;
+            lines.push(line.to_owned());
         }
     }
-    s = out.trim().to_string();
-    if s.is_empty() {
-        return String::new();
-    }
-    // Capitalize first letter.
-    let mut chars: Vec<char> = s.chars().collect();
-    if let Some(first) = chars.first_mut() {
-        *first = first.to_ascii_uppercase();
-    }
-    s = chars.into_iter().collect();
-    match style {
-        Style::Short | Style::Brevity => {
-            // crude brevity: keep first 2 sentences max
-            let parts: Vec<&str> = s.split_inclusive(&['.', '?', '!'][..]).collect();
-            if parts.len() > 2 {
-                s = parts[..2].concat();
-            }
-            format!("{} (offline brevity polish)", s.trim())
-        }
-        Style::Direct => format!("{} (offline direct polish: do exactly as specified)", s.trim()),
-        Style::Casual => format!("{} (offline casual polish)", s.trim()),
-        Style::Informed => format!("{} (offline informed polish)", s.trim()),
-        Style::Normal => format!("{} (offline grammar polish)", s.trim()),
+    lines.join("\n").trim().to_owned()
+}
+
+fn capitalize_first(input: &str) -> String {
+    let mut chars = input.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 
-/// Blocking Gemini call. Returns rewritten prompt or error string.
-pub fn polish_blocking(input: &str, style: Style, api_key: &str) -> Result<String, String> {
+/// Offline fallback when no API key is set. Deterministic, no network.
+pub fn offline_polish(input: &str, style: Style) -> String {
+    let normalized = normalize_whitespace(input);
+    if normalized.is_empty() {
+        return String::new();
+    }
+    let polished = capitalize_first(&normalized);
+    match style {
+        Style::Short | Style::Brevity => {
+            let first_two: String = polished
+                .split_inclusive(['.', '?', '!'])
+                .take(2)
+                .collect();
+            format!("{} (offline brevity polish)", first_two.trim())
+        }
+        Style::Direct => {
+            format!("{polished} (offline direct polish: do exactly as specified)")
+        }
+        Style::Casual => format!("{polished} (offline casual polish)"),
+        Style::Informed => format!("{polished} (offline informed polish)"),
+        Style::Normal => format!("{polished} (offline grammar polish)"),
+    }
+}
+
+/// Blocking Gemini call.
+pub fn polish_blocking(input: &str, style: Style, api_key: &str) -> Result<String, PolishError> {
     if api_key.trim().is_empty() {
         return Ok(offline_polish(input, style));
     }
     if input.trim().is_empty() {
-        return Err("Input is empty.".to_string());
+        return Err(PolishError::EmptyInput);
     }
+
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        model_id(),
         api_key.trim()
     );
     let body = json!({
         "contents": [{
             "parts": [{ "text": format!("{}\n\n---\nUser text to rewrite:\n{}", system_prompt(style), input) }]
         }],
-        "generationConfig": { "temperature": 0.3, "maxOutputTokens": 1024 }
+        "generationConfig": { "maxOutputTokens": 1024 }
     });
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("http client error: {e}"))?;
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .map_err(|e| format!("request failed: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        let short = text.chars().take(500).collect::<String>();
-        return Err(format!("Gemini {status}: {short}"));
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let response = client.post(&url).json(&body).send()?;
+    let status = response.status();
+    let body = response.text()?;
+
+    if !status.is_success() {
+        let snippet: String = body.chars().take(500).collect();
+        return Err(PolishError::Api {
+            status,
+            body: snippet,
+        });
     }
-    let v: Value = resp.json().map_err(|e| format!("bad json: {e}"))?;
-    // candidates[0].content.parts[0].text
-    let text = v
+
+    let json: Value = serde_json::from_str(&body)?;
+    let text = json
         .pointer("/candidates/0/content/parts/0/text")
-        .and_then(|t| t.as_str())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    if text.is_empty() {
-        // surface API error message if present
-        if let Some(err) = v.pointer("/error/message").and_then(|m| m.as_str()) {
-            return Err(format!("Gemini error: {err}"));
-        }
-        return Err("Empty response from model.".to_string());
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned);
+
+    match text {
+        Some(text) => Ok(text),
+        None => match json
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+        {
+            Some(message) => Err(PolishError::ApiMessage(message.to_owned())),
+            None => Err(PolishError::EmptyResponse),
+        },
     }
-    Ok(text)
 }
