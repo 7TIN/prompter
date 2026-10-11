@@ -6,7 +6,11 @@ edition = "2024"
 [dependencies]
 arboard = "3.6.1"
 global-hotkey = "0.8.0"
-gpui-kit = "0.7.1"
+# `test-support` is on for the application itself, not only for tests, because
+# the view registers its layout regions for observation with `.test_support()`.
+# Registration is inert outside a test run, and keeping one feature set means the
+# markup the tests query is byte-for-byte the markup that ships.
+gpui-kit = { version = "0.7.1", features = ["test-support"] }
 reqwest = { version = "0.13.5", features = ["json", "blocking", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.152"

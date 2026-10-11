@@ -1,4 +1,4 @@
-use std::{fmt, time::Duration};
+use std::{fmt, sync::OnceLock, time::Duration};
 
 use serde_json::{Value, json};
 
@@ -7,10 +7,16 @@ use crate::style::Style;
 /// Default model. Override with the `GEMINI_MODEL` env var.
 pub const DEFAULT_MODEL: &str = "gemini-3.6-flash";
 
+/// How long one rewrite may take before it is reported as failed.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug)]
 pub enum PolishError {
     EmptyInput,
     Transport(reqwest::Error),
+    /// Building the shared HTTP client failed, reported by message because the
+    /// error itself is stored once and cannot be cloned back out.
+    TransportMessage(String),
     Api {
         status: reqwest::StatusCode,
         body: String,
@@ -25,6 +31,9 @@ impl fmt::Display for PolishError {
         match self {
             Self::EmptyInput => f.write_str("input is empty"),
             Self::Transport(e) => write!(f, "request failed: {e}"),
+            Self::TransportMessage(message) => {
+                write!(f, "could not open an HTTP connection: {message}")
+            }
             Self::Api { status, body } => write!(f, "Gemini {status}: {body}"),
             Self::Decode(e) => write!(f, "invalid response: {e}"),
             Self::EmptyResponse => f.write_str("empty response from model"),
@@ -78,11 +87,7 @@ fn normalize_whitespace(input: &str) -> String {
     let without_cr = input.replace('\r', "");
     let collapsed = without_cr
         .lines()
-        .map(|line| {
-            line.split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect::<Vec<_>>()
         .join("\n");
     // Collapse runs of blank lines into a single blank line.
@@ -119,10 +124,7 @@ pub fn offline_polish(input: &str, style: Style) -> String {
     let polished = capitalize_first(&normalized);
     match style {
         Style::Short | Style::Brevity => {
-            let first_two: String = polished
-                .split_inclusive(['.', '?', '!'])
-                .take(2)
-                .collect();
+            let first_two: String = polished.split_inclusive(['.', '?', '!']).take(2).collect();
             format!("{} (offline brevity polish)", first_two.trim())
         }
         Style::Direct => {
@@ -131,6 +133,26 @@ pub fn offline_polish(input: &str, style: Style) -> String {
         Style::Casual => format!("{polished} (offline casual polish)"),
         Style::Informed => format!("{polished} (offline informed polish)"),
         Style::Normal => format!("{polished} (offline grammar polish)"),
+    }
+}
+
+/// One HTTP client for the process.
+///
+/// Building a `reqwest::blocking::Client` per request repeats TLS setup and
+/// connection-pool construction on every rewrite, which is pure latency the user
+/// waits through. The client is immutable once built, so it is built on first
+/// use and shared. `reqwest::Error` is not `Clone`, so a construction failure is
+/// stored as its message rather than as the error itself.
+fn http_client() -> Result<&'static reqwest::blocking::Client, PolishError> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(client) => Ok(client),
+        Err(message) => Err(PolishError::TransportMessage(message.clone())),
     }
 }
 
@@ -155,10 +177,7 @@ pub fn polish_blocking(input: &str, style: Style, api_key: &str) -> Result<Strin
         "generationConfig": { "maxOutputTokens": 1024 }
     });
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let response = client.post(&url).json(&body).send()?;
+    let response = http_client()?.post(&url).json(&body).send()?;
     let status = response.status();
     let body = response.text()?;
 
@@ -180,10 +199,7 @@ pub fn polish_blocking(input: &str, style: Style, api_key: &str) -> Result<Strin
 
     match text {
         Some(text) => Ok(text),
-        None => match json
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-        {
+        None => match json.pointer("/error/message").and_then(Value::as_str) {
             Some(message) => Err(PolishError::ApiMessage(message.to_owned())),
             None => Err(PolishError::EmptyResponse),
         },
