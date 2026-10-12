@@ -785,25 +785,14 @@ impl Render for PrompterView {
         // The title bar is the window's own chrome and belongs to every screen:
         // it is what makes the window draggable and closable now that the
         // platform's caption is gone, so it cannot be owned by one of them.
+        // The chrome is one flat translucent surface: the root background the
+        // component layer paints. No second layer, no falloff — a gradient veil
+        // over a live backdrop reads as the backdrop bleeding through unevenly
+        // (grey melting into whatever sits behind), which is the opposite of
+        // glass.
         v_flex()
             .size_full()
-            .relative()
             .text_color(cx.theme().foreground)
-            // Raw GPUI, deliberately. The component layer owns exactly one
-            // background for a window — a flat colour on the root surface — and
-            // the window wants a second layer with a falloff, so it composes it
-            // itself.
-            //
-            // It is absolutely positioned and spans the whole window, title bar
-            // included, so the light falls across the surface rather than
-            // stopping at the top of the content area.
-            .child(
-                div()
-                    .id("glass-depth")
-                    .absolute()
-                    .inset_0()
-                    .bg(theme::glass_depth(cx)),
-            )
             .child(self.render_title_bar(cx))
             .child(match self.screen {
                 Screen::Setup => self.render_setup(cx).into_any_element(),

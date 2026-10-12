@@ -1,26 +1,21 @@
 //! The product's theme layer.
 //!
-//! Prompter is a light window: the *chrome* — the window surface itself — is
-//! white, the *content* surfaces sit on top of it in light neutrals (wells a
-//! step down, controls a step up in grey), and text is near-black. That ladder
-//! is the whole design, and it is why the colours live here rather than at the
-//! call sites.
+//! Prompter is a light window: the *chrome* — the window surface itself — is a
+//! translucent white sheet over the desktop, and the *content* sits on top of
+//! it in solid light neutrals (white wells, grey controls) with near-black
+//! text. Only the window surface turns down; buttons, editors and text stay
+//! fully opaque, because a control you cannot see the edge of is not a
+//! control. That split is the whole design, and it is why the colours live
+//! here rather than at the call sites.
 //!
-//! A glass variant still exists behind `PROMPTER_BACKDROP=blurred`, with its
-//! untinted-acrylic override in [`crate::acrylic`], but it is shelved: on at
-//! least one machine the compositor accepts the blur policy and renders black.
-//! The default below is opaque, and everything here is tuned for opaque first.
-//!
-//! What carries its own fill: buttons, icons, and the editors. The window is
-//! the white surface; the things you read and click sit on grey fills, because
-//! a control you cannot see the edge of is not a control.
+//! Blur is shelved, not attempted: the gradient-transparency material behind
+//! the default needs no blur from the compositor, which is exactly why it is
+//! the one material observed working. The untinted-acrylic override lives on
+//! in [`crate::acrylic`] behind `PROMPTER_BACKDROP=blurred`.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::theme::Theme;
-use gpui_kit::{
-    App, Background, Hsla, Pixels, WindowBackgroundAppearance, linear_color_stop, linear_gradient,
-    px, rgb,
-};
+use gpui_kit::{App, Hsla, Pixels, WindowBackgroundAppearance, px, rgb};
 
 /// Tint opacity of the window surface, as `(light, dark)`.
 ///
@@ -44,6 +39,17 @@ use gpui_kit::{
 /// only thing carrying legibility, so a value tuned for a blurred desktop can be
 /// too low on a platform without one.
 const BACKDROP_ALPHA: (f32, f32) = (0.16, 0.20);
+
+/// Opacity of the translucent window surface: white enough to read as a glass
+/// sheet, open enough to show the desktop through it.
+///
+/// Bleed-through dilutes linearly with this number and nothing else dilutes
+/// it: the compositor here cannot blur, so there is no frosted middle ground
+/// between "exact colours show through" and "solid". At `0.45` a saturated
+/// window behind read as sky blue (`0.45 white + 0.55 behind`); at `0.75` the
+/// same behind-window is a faint tint on white. `PROMPTER_GLASS_ALPHA`
+/// overrides it without a rebuild.
+const TRANSLUCENT_ALPHA: f32 = 0.75;
 
 /// Overrides [`BACKDROP_ALPHA`] with a single value for both modes.
 ///
@@ -91,11 +97,28 @@ pub const EDITOR_MIN_HEIGHT: Pixels = px(96.);
 /// application ever starts following the OS appearance, call this again from
 /// the same place that switched the mode.
 pub fn install(cx: &mut App) {
-    // The solid light design is the default and ignores the glass alpha: on an
-    // opaque window a translucent root would blend with the renderer's clear
-    // colour, not with the desktop, and wash the window out.
+    // The solid light design is the default for an opaque window and ignores
+    // the glass alpha: on an opaque window a translucent root would blend with
+    // the renderer's clear colour, not with the desktop, and wash out.
     if backdrop() == WindowBackgroundAppearance::Opaque {
         Theme::update(cx, apply_solid_light);
+        return;
+    }
+
+    // The translucent look: the desktop reads through the chrome (no blur —
+    // the compositor on at least one machine accepts blur policies and renders
+    // black, so blur is shelved), while every role keeps the solid light
+    // palette. Buttons, editors and text stay fully opaque; only the window
+    // surface itself turns down.
+    if backdrop() == WindowBackgroundAppearance::Transparent {
+        let override_alpha = backdrop_alpha_override();
+        Theme::update(cx, |theme| {
+            apply_solid_light(theme);
+            theme.colors.background = theme
+                .colors
+                .background
+                .opacity(override_alpha.unwrap_or(TRANSLUCENT_ALPHA));
+        });
         return;
     }
 
@@ -199,46 +222,15 @@ pub fn edge(cx: &App) -> Hsla {
     cx.theme().border.opacity(EDGE_ALPHA)
 }
 
-/// The window's top light, built from raw GPUI rather than from a component.
-///
-/// The component layer can only give the window one flat rectangle: the root
-/// surface colour. This gradient is painted over it, spanning the title bar as
-/// well, so a little shade falls across the top of the window and the white
-/// surface gains depth instead of glaring flat.
-///
-/// `angle` is 180°, top to bottom. The first stop sits at the top edge.
-pub fn glass_depth(_cx: &App) -> Background {
-    linear_gradient(
-        180.,
-        linear_color_stop(
-            Hsla {
-                h: 0.,
-                s: 0.,
-                l: 0.96,
-                a: 0.7,
-            },
-            0.,
-        ),
-        linear_color_stop(
-            Hsla {
-                h: 0.,
-                s: 0.,
-                l: 1.,
-                a: 0.,
-            },
-            1.,
-        ),
-    )
-}
-
 /// Which backdrop material the window asks the platform for.
 ///
-/// The default is `Opaque`: a solid window in the theme's own colours. Glass is
-/// shelved — the compositor on at least one machine accepts the blur policy and
-/// renders black — but still selectable: `blurred` asks for Desktop Acrylic and
-/// [`crate::acrylic::apply`] then overwrites gpui's tinted policy with its own.
-/// Every non-`Opaque` value also makes the renderer clear to fully transparent,
-/// which is what lets a platform material show through at all.
+/// The default is `Transparent`: the gradient-transparency material, which
+/// composites the desktop through per-pixel alpha without asking the
+/// compositor to blur. It is the one material observed working — blur
+/// (acrylic, blur-behind, transient) is accepted by the call and renders
+/// black, so `blurred` stays selectable but shelved. Every non-`Opaque` value
+/// also makes the renderer clear to fully transparent, which is what lets the
+/// material show through at all.
 ///
 /// `mica` and `mica-alt` are the opaque system materials, selectable only as a
 /// control: if switching to one visibly changes the window, the material path
@@ -251,9 +243,9 @@ pub fn backdrop() -> WindowBackgroundAppearance {
     match std::env::var("PROMPTER_BACKDROP").ok().as_deref() {
         Some("mica") => WindowBackgroundAppearance::MicaBackdrop,
         Some("mica-alt") => WindowBackgroundAppearance::MicaAltBackdrop,
-        Some("transparent") => WindowBackgroundAppearance::Transparent,
+        Some("opaque") => WindowBackgroundAppearance::Opaque,
         Some("blurred") => WindowBackgroundAppearance::Blurred,
-        _ => WindowBackgroundAppearance::Opaque,
+        _ => WindowBackgroundAppearance::Transparent,
     }
 }
 
