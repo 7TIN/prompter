@@ -1,38 +1,33 @@
 //! The product's theme layer.
 //!
-//! Prompter is a glass window, the way a native Windows acrylic window is: the
-//! *chrome* — the window surface itself — is translucent, so the desktop the
-//! platform blurs behind it reads through, and the *content* surfaces sit on top
-//! of it. That split is the whole design, and it is why the alphas live here
-//! rather than at the call sites.
+//! Prompter is a light window: the *chrome* — the window surface itself — is
+//! white, the *content* surfaces sit on top of it in light neutrals (wells a
+//! step down, controls a step up in grey), and text is near-black. That ladder
+//! is the whole design, and it is why the colours live here rather than at the
+//! call sites.
 //!
-//! How the window actually becomes transparent, on every platform:
+//! A glass variant still exists behind `PROMPTER_BACKDROP=blurred`, with its
+//! untinted-acrylic override in [`crate::acrylic`], but it is shelved: on at
+//! least one machine the compositor accepts the blur policy and renders black.
+//! The default below is opaque, and everything here is tuned for opaque first.
 //!
-//! - `WindowBackgroundAppearance::Blurred` asks the OS for the blur (acrylic on
-//!   Windows 10 1903+, Mica elsewhere). That alone does nothing — the window
-//!   still paints its own background.
-//! - The component layer's window root paints `theme.tokens.background`, which
-//!   is an opaque palette colour. So the background token's alpha is what has to
-//!   come down, and that is what [`install`] does. Because `Theme::update` is
-//!   the write path that keeps the solid colour, the renderable background and
-//!   the base-layer projection in step, one edit moves all three.
-//!
-//! What is deliberately *not* translucent: buttons, icons, and the editors. The
-//! window is glass; the things you read and click are not, because a control
-//! you cannot see the edge of is not a control.
+//! What carries its own fill: buttons, icons, and the editors. The window is
+//! the white surface; the things you read and click sit on grey fills, because
+//! a control you cannot see the edge of is not a control.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::theme::Theme;
 use gpui_kit::{
     App, Background, Hsla, Pixels, WindowBackgroundAppearance, linear_color_stop, linear_gradient,
-    px,
+    px, rgb,
 };
 
 /// Tint opacity of the window surface, as `(light, dark)`.
 ///
-/// This is the whole glass effect. The window is composited by the platform
-/// (acrylic on Windows) and the application paints one translucent layer over
-/// it, so this number decides how much of the desktop reads through.
+/// Only used when the backdrop is *not* opaque (the shelved glass variant). The
+/// window is composited by the platform and the application paints one
+/// translucent layer over it, so this number decides how much of the desktop
+/// reads through.
 ///
 /// It is a genuine trade, not a preference:
 ///
@@ -48,12 +43,6 @@ use gpui_kit::{
 /// Platform note: if the OS cannot supply the backdrop at all, this tint is the
 /// only thing carrying legibility, so a value tuned for a blurred desktop can be
 /// too low on a platform without one.
-///
-/// These numbers were originally much higher, because they were tuned while the
-/// backdrop was still gpui's opaque-black acrylic and the only way to make that
-/// tolerable was to wash over it. With an untinted, genuinely blurred backdrop
-/// behind them, anything above roughly a fifth hides the blur that the whole
-/// effect exists to show.
 const BACKDROP_ALPHA: (f32, f32) = (0.16, 0.20);
 
 /// Overrides [`BACKDROP_ALPHA`] with a single value for both modes.
@@ -76,7 +65,7 @@ fn backdrop_alpha_override() -> Option<f32> {
 }
 
 /// Opacity of the window's hairline edge.
-const EDGE_ALPHA: f32 = 0.6;
+const EDGE_ALPHA: f32 = 1.0;
 
 /// The floor for either editor pane. Below this a prompt stops being workable,
 /// which is what stops a drag from collapsing a pane out of existence.
@@ -102,6 +91,14 @@ pub const EDITOR_MIN_HEIGHT: Pixels = px(96.);
 /// application ever starts following the OS appearance, call this again from
 /// the same place that switched the mode.
 pub fn install(cx: &mut App) {
+    // The solid light design is the default and ignores the glass alpha: on an
+    // opaque window a translucent root would blend with the renderer's clear
+    // colour, not with the desktop, and wash the window out.
+    if backdrop() == WindowBackgroundAppearance::Opaque {
+        Theme::update(cx, apply_solid_light);
+        return;
+    }
+
     let override_alpha = backdrop_alpha_override();
     Theme::update(cx, |theme| {
         let alpha = override_alpha.unwrap_or_else(|| {
@@ -136,6 +133,64 @@ pub fn install(cx: &mut App) {
     });
 }
 
+/// An opaque sRGB colour as the theme's working type.
+///
+/// `rgb` returns `Rgba` and the token layer speaks `ThemeToken`, so every
+/// palette stop passes through `Hsla` here instead of converting twice at each
+/// call site.
+fn solid(hex: u32) -> Hsla {
+    rgb(hex).into()
+}
+
+/// The solid light palette: white chrome, white wells, neutral-grey controls,
+/// near-black text.
+///
+/// Every role the window renders is pinned here so the design does not depend
+/// on which shipped theme happened to load. The numbers are Tailwind neutrals,
+/// chosen so each step of the ladder is visibly distinct on white:
+///
+/// - `#ffffff` chrome and editor wells, `#e5e5e5` buttons;
+/// - `#171717` text, `#737373` secondary text, `#e5e5e5` hairlines;
+/// - one dark neutral (`#171717`) reserved for the primary commit, so it reads
+///   as the commit without introducing a hue.
+fn apply_solid_light(theme: &mut Theme) {
+    theme.colors.background = solid(0xffffff);
+    theme.colors.foreground = solid(0x171717);
+    theme.colors.muted = solid(0xf5f5f5);
+    theme.colors.muted_foreground = solid(0x737373);
+    theme.colors.border = solid(0xe5e5e5);
+    theme.colors.input = solid(0xffffff);
+    theme.colors.secondary = solid(0xe5e5e5);
+    theme.colors.secondary_foreground = solid(0x171717);
+    theme.colors.primary = solid(0x171717);
+    theme.colors.primary_foreground = solid(0xffffff);
+    theme.colors.accent = solid(0x171717);
+    theme.colors.accent_foreground = solid(0xffffff);
+    theme.colors.popover = solid(0xffffff);
+
+    // Raised controls: light neutral fills with dark text, hover a step
+    // darker, press a further step — the press state must stay clearly
+    // distinct from the white chrome around it.
+    theme.tokens.button = solid(0xe5e5e5).into();
+    theme.tokens.button_hover = solid(0xd4d4d4).into();
+    theme.tokens.button_active = solid(0xa3a3a3).into();
+    theme.tokens.button_foreground = solid(0x171717).into();
+
+    // The secondary set backs the outline segmented control. Same ladder as
+    // the default set so the two read as one family.
+    theme.tokens.button_secondary = solid(0xe5e5e5).into();
+    theme.tokens.button_secondary_hover = solid(0xd4d4d4).into();
+    theme.tokens.button_secondary_active = solid(0xa3a3a3).into();
+    theme.tokens.button_secondary_foreground = solid(0x171717).into();
+
+    // The primary commit is the dark neutral: white text on near-black in all
+    // three states, so it is unmistakably the commit and still hue-free.
+    theme.tokens.button_primary = solid(0x171717).into();
+    theme.tokens.button_primary_hover = solid(0x404040).into();
+    theme.tokens.button_primary_active = solid(0x262626).into();
+    theme.tokens.button_primary_foreground = solid(0xffffff).into();
+}
+
 /// The window's hairline edge.
 ///
 /// The window already has a frame drawn by the platform's border layer; this one
@@ -144,86 +199,69 @@ pub fn edge(cx: &App) -> Hsla {
     cx.theme().border.opacity(EDGE_ALPHA)
 }
 
-/// The window's glass, built from raw GPUI rather than from a component.
+/// The window's top light, built from raw GPUI rather than from a component.
 ///
-/// The component layer can only give the window one flat translucent rectangle:
-/// `WindowState::style` sets a single background colour on the root surface, and
-/// a flat tint is exactly what reads as grey paint. A real acrylic surface has
-/// *depth* — the part nearest the light is lighter, and the tint falls away
-/// toward the bottom — and that needs a second layer the component layer has no
-/// concept of.
-///
-/// So the window is composed here instead: the root keeps its translucent tint,
-/// and this gradient is painted over it, spanning the title bar as well, so the
-/// light falls across the whole window the way it does on a native one.
+/// The component layer can only give the window one flat rectangle: the root
+/// surface colour. This gradient is painted over it, spanning the title bar as
+/// well, so a little shade falls across the top of the window and the white
+/// surface gains depth instead of glaring flat.
 ///
 /// `angle` is 180°, top to bottom. The first stop sits at the top edge.
-pub fn glass_depth(cx: &App) -> Background {
-    let surface = cx.theme().popover;
+pub fn glass_depth(_cx: &App) -> Background {
     linear_gradient(
         180.,
-        linear_color_stop(surface.opacity(DEPTH_ALPHA), 0.),
-        linear_color_stop(cx.theme().transparent, 1.),
+        linear_color_stop(
+            Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.96,
+                a: 0.7,
+            },
+            0.,
+        ),
+        linear_color_stop(
+            Hsla {
+                h: 0.,
+                s: 0.,
+                l: 1.,
+                a: 0.,
+            },
+            1.,
+        ),
     )
 }
 
-/// How strongly the glass lightens toward the top of the window.
-///
-/// Deliberately tiny, and deliberately *additive* to [`BACKDROP_ALPHA`] rather
-/// than part of it: two translucent layers compound, so `0.16` and `0.06` cover
-/// about `0.21` of the backdrop at the top and `0.16` at the bottom. That budget
-/// is the whole look. Raising either number without lowering the other is what
-/// turned the window into flat grey paint.
-const DEPTH_ALPHA: f32 = 0.06;
-
 /// Which backdrop material the window asks the platform for.
 ///
-/// This selects only what the *renderer* does and, for Mica, what gpui writes:
-/// every non-`Opaque` value makes the renderer clear to fully transparent, which
-/// is what lets the platform's material show through at all. The material itself
-/// is written afterwards by [`crate::acrylic::apply`], which reads this value when
-/// `PROMPTER_ACCENT` is unset so the two variables cannot contradict each other.
+/// The default is `Opaque`: a solid window in the theme's own colours. Glass is
+/// shelved — the compositor on at least one machine accepts the blur policy and
+/// renders black — but still selectable: `blurred` asks for Desktop Acrylic and
+/// [`crate::acrylic::apply`] then overwrites gpui's tinted policy with its own.
+/// Every non-`Opaque` value also makes the renderer clear to fully transparent,
+/// which is what lets a platform material show through at all.
 ///
-/// The variants map onto Microsoft's system backdrops as follows:
-///
-/// - `Blurred` is **Desktop Acrylic**: "a semi-transparent material that
-///   replicates the effect of frosted glass". It is the only one of these that
-///   both blurs and lets the desktop read through, so it is the default.
-/// - `Mica` is the opposite — Microsoft describes it as "an *opaque* material
-///   that incorporates the user's theme and desktop wallpaper", sampled from the
-///   wallpaper once for performance. It will never look see-through, whatever
-///   alpha this application paints. It is selectable only as a control: if
-///   switching to it visibly changes the window, the material path is alive.
-///
-/// Microsoft's own guidance is that Acrylic belongs on transient, light-dismiss
-/// surfaces and that a persistent app window should use Mica. That guidance is
-/// deliberately not followed here: it is a trade of legibility for convention,
-/// and this window's whole purpose is to show the desktop behind it.
+/// `mica` and `mica-alt` are the opaque system materials, selectable only as a
+/// control: if switching to one visibly changes the window, the material path
+/// is alive. Mica is opaque by definition and will never look see-through.
 ///
 /// ```text
-/// PROMPTER_BACKDROP=mica cargo run
+/// PROMPTER_BACKDROP=blurred cargo run
 /// ```
 pub fn backdrop() -> WindowBackgroundAppearance {
     match std::env::var("PROMPTER_BACKDROP").ok().as_deref() {
         Some("mica") => WindowBackgroundAppearance::MicaBackdrop,
         Some("mica-alt") => WindowBackgroundAppearance::MicaAltBackdrop,
         Some("transparent") => WindowBackgroundAppearance::Transparent,
-        Some("opaque") => WindowBackgroundAppearance::Opaque,
-        _ => WindowBackgroundAppearance::Blurred,
+        Some("blurred") => WindowBackgroundAppearance::Blurred,
+        _ => WindowBackgroundAppearance::Opaque,
     }
 }
 
-/// The editor surfaces: fully opaque, in the window background's own colour.
+/// The editor surfaces: white wells, fully opaque.
 ///
-/// Text has to be readable over whatever happens to be behind the window, and an
-/// editor is where the reading happens. This restores the alpha that
-/// [`install`] removed from the background token — it is the same colour, not a
-/// second one — so the editors look exactly as they do in an opaque theme while
-/// the chrome around them stays glass.
-pub fn field(cx: &App) -> Hsla {
-    let background = cx.theme().background;
-    Hsla {
-        a: 1.0,
-        ..background
-    }
+/// The wells are the same white as the chrome, so their edges come from the
+/// Textarea's own border rather than from a fill step. Text never depends on
+/// anything behind the window, because there is nothing behind it.
+pub fn field(_cx: &App) -> Hsla {
+    solid(0xffffff)
 }

@@ -542,6 +542,7 @@ impl PrompterView {
                         // say. The tooltip earns its place for exactly that
                         // difference in scope.
                         Button::new("paste")
+                            .small()
                             .icon(IconName::Clipboard)
                             .label("Paste")
                             .tooltip("Replace the prompt with the clipboard")
@@ -628,6 +629,11 @@ impl PrompterView {
                             .test_support()
                             .size_full()
                             .min_h_0()
+                            // Half of the 4px breathing room between the two
+                            // panes; the result pane carries the other half.
+                            // Padding, not margin: it insets this pane's content
+                            // without moving the divider the drag owns.
+                            .pb(px(2.))
                             .gap_2()
                             .child(section_header("Prompt", muted, None))
                             .child(
@@ -650,6 +656,9 @@ impl PrompterView {
                             .test_support()
                             .size_full()
                             .min_h_0()
+                            // The other half of the 4px between the panes; see
+                            // the prompt pane above.
+                            .pt(px(2.))
                             .gap_2()
                             .child(section_header(
                                 "Result",
@@ -707,12 +716,9 @@ impl PrompterView {
 
     /// The window's own title bar, drawn by the application.
     ///
-    /// It is transparent on purpose. The component layer fills it with a
-    /// gradient mixed from the theme's title-bar token, which would put an
-    /// opaque band across the top of a glass window — the same mistake as a
-    /// filled card. Only its hairline separator and its window controls remain,
-    /// so the blurred backdrop runs uninterrupted from the window's top edge
-    /// down through the editors.
+    /// It carries no fill: the root surface behind it is already the theme
+    /// background, so a second fill here would only band against it. Only its
+    /// hairline separator and its window controls remain.
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         TitleBar::new().bg(cx.theme().transparent).child(
             div()
@@ -733,9 +739,9 @@ impl PrompterView {
             .on_action(cx.listener(Self::on_generate_action))
             .child(
                 // The card carries layout and an edge, and no fill. A wash here
-                // would sit between the OS backdrop and the window surface and
-                // read as flat grey rather than glass — the window itself is
-                // already the translucent surface.
+                // would sit between the window surface and the content and read
+                // as a second, muddier background — the window itself is
+                // already the white surface.
                 v_flex()
                     .id("card")
                     .test_support()
@@ -784,14 +790,13 @@ impl Render for PrompterView {
             .relative()
             .text_color(cx.theme().foreground)
             // Raw GPUI, deliberately. The component layer owns exactly one
-            // background for a window — a flat colour on the root surface — and a
-            // flat tint is what reads as grey paint. The glass needs a second
-            // layer with a falloff, so the window composes it itself.
+            // background for a window — a flat colour on the root surface — and
+            // the window wants a second layer with a falloff, so it composes it
+            // itself.
             //
             // It is absolutely positioned and spans the whole window, title bar
             // included, so the light falls across the surface rather than
-            // stopping at the top of the content area. Everything after it is
-            // transparent, so this is the only thing painted over the backdrop.
+            // stopping at the top of the content area.
             .child(
                 div()
                     .id("glass-depth")
@@ -856,8 +861,12 @@ pub fn prepare_app(cx: &mut App) {
 
 /// The window's default size, and the floor below which its layout stops
 /// working: two editors side by side plus a toolbar and a status row.
-pub const WINDOW_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(780.), px(560.));
-pub const WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(640.), px(420.));
+///
+/// Short on purpose: the window is a utility surface, not a document, and the
+/// editors scroll. The resizable split owns the interior, so a short window
+/// just gives each pane less room rather than cropping anything.
+pub const WINDOW_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(780.), px(460.));
+pub const WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(640.), px(380.));
 
 fn font_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();

@@ -18,18 +18,17 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(app::WINDOW_MIN_SIZE),
-                // Raw GPUI window configuration. Any non-`Opaque` appearance
-                // makes the renderer clear to fully transparent, which is what
-                // lets the platform backdrop show through. The material itself
-                // is chosen afterwards in `acrylic::apply`; this only has to be
-                // non-opaque. The app paints its own translucent layers over the
-                // top — see `theme::backdrop` and `theme::glass_depth`.
+                // Raw GPUI window configuration. `window_background` is the
+                // platform's backdrop material, defaulting to opaque; the glass
+                // variant behind `PROMPTER_BACKDROP=blurred` is shelved but
+                // still selectable. The app paints its own surfaces over it —
+                // see `theme`.
                 window_background: app::theme::backdrop(),
                 // Base options come from the title bar, not from `Default`, so
                 // the platform's own title bar is suppressed and the window draws
                 // its own. `appears_transparent` is what removes the native
                 // caption on Windows; without it the window keeps the system
-                // header and the blur only ever shows inside the content area.
+                // header above the content area.
                 ..TitleBar::window_options()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
