@@ -48,7 +48,13 @@ use gpui_kit::{
 /// Platform note: if the OS cannot supply the backdrop at all, this tint is the
 /// only thing carrying legibility, so a value tuned for a blurred desktop can be
 /// too low on a platform without one.
-const BACKDROP_ALPHA: (f32, f32) = (0.30, 0.26);
+///
+/// These numbers were originally much higher, because they were tuned while the
+/// backdrop was still gpui's opaque-black acrylic and the only way to make that
+/// tolerable was to wash over it. With an untinted, genuinely blurred backdrop
+/// behind them, anything above roughly a fifth hides the blur that the whole
+/// effect exists to show.
+const BACKDROP_ALPHA: (f32, f32) = (0.16, 0.20);
 
 /// Overrides [`BACKDROP_ALPHA`] with a single value for both modes.
 ///
@@ -164,19 +170,25 @@ pub fn glass_depth(cx: &App) -> Background {
 /// How strongly the glass lightens toward the top of the window.
 ///
 /// Deliberately tiny, and deliberately *additive* to [`BACKDROP_ALPHA`] rather
-/// than part of it: two translucent layers compound, so `0.30` and `0.12` cover
-/// about `0.38` of the backdrop at the top and `0.30` at the bottom. That budget
+/// than part of it: two translucent layers compound, so `0.16` and `0.06` cover
+/// about `0.21` of the backdrop at the top and `0.16` at the bottom. That budget
 /// is the whole look. Raising either number without lowering the other is what
 /// turned the window into flat grey paint.
-const DEPTH_ALPHA: f32 = 0.12;
+const DEPTH_ALPHA: f32 = 0.06;
 
 /// Which backdrop material the window asks the platform for.
 ///
-/// This maps directly onto Microsoft's two system backdrops:
+/// This selects only what the *renderer* does and, for Mica, what gpui writes:
+/// every non-`Opaque` value makes the renderer clear to fully transparent, which
+/// is what lets the platform's material show through at all. The material itself
+/// is written afterwards by [`crate::acrylic::apply`], which reads this value when
+/// `PROMPTER_ACCENT` is unset so the two variables cannot contradict each other.
+///
+/// The variants map onto Microsoft's system backdrops as follows:
 ///
 /// - `Blurred` is **Desktop Acrylic**: "a semi-transparent material that
-///   replicates the effect of frosted glass". It is the only one that lets the
-///   desktop read through, so it is the default and the right choice here.
+///   replicates the effect of frosted glass". It is the only one of these that
+///   both blurs and lets the desktop read through, so it is the default.
 /// - `Mica` is the opposite — Microsoft describes it as "an *opaque* material
 ///   that incorporates the user's theme and desktop wallpaper", sampled from the
 ///   wallpaper once for performance. It will never look see-through, whatever
@@ -197,9 +209,6 @@ pub fn backdrop() -> WindowBackgroundAppearance {
         Some("mica-alt") => WindowBackgroundAppearance::MicaAltBackdrop,
         Some("transparent") => WindowBackgroundAppearance::Transparent,
         Some("opaque") => WindowBackgroundAppearance::Opaque,
-        // Acrylic. Passed to Windows as `ACCENT_ENABLE_ACRYLIC_BLIND` with a
-        // zeroed gradient, which means the OS contributes no tint of its own and
-        // the translucency is entirely this application's to choose.
         _ => WindowBackgroundAppearance::Blurred,
     }
 }
